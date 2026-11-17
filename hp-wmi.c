@@ -754,6 +754,13 @@ struct hp_wmi_hwmon_priv {
 	u8 mode;
 	u8 cpu_pwm;
 	u8 gpu_pwm;
+	/*
+	 * zero_rpm_stops_fans boards only: fan explicitly stopped by writing
+	 * pwmN = 0 in manual mode. The keep-alive never refreshes a stopped
+	 * fan, so userspace must rewrite 0 within ~120 s or the EC resumes
+	 * its own curve: a dead-man switch for a crashed fan daemon.
+	 */
+	bool stopped[2];
 	struct delayed_work keep_alive_dwork;
 };
 
@@ -1107,8 +1114,10 @@ static int hp_wmi_fan_speed_set(struct hp_wmi_hwmon_priv *priv)
 	u8 fan_speed[2];
 	int ret;
 
-	fan_speed[CPU_FAN] = hp_wmi_fan_target(priv->cpu_pwm, priv);
-	fan_speed[GPU_FAN] = hp_wmi_fan_target(priv->gpu_pwm, priv);
+	fan_speed[CPU_FAN] = priv->stopped[CPU_FAN] ? 0 :
+			     hp_wmi_fan_target(priv->cpu_pwm, priv);
+	fan_speed[GPU_FAN] = priv->stopped[GPU_FAN] ? 0 :
+			     hp_wmi_fan_target(priv->gpu_pwm, priv);
 
 	ret = hp_wmi_get_fan_count_userdefine_trigger();
 	if (ret < 0)
@@ -3411,6 +3420,14 @@ static int hp_wmi_hwmon_write(struct device *dev, enum hwmon_sensor_types type,
 			/* PWM input is invalid when not in manual mode */
 			if (priv->mode != PWM_MODE_MANUAL)
 				return -EINVAL;
+			if (channel != CPU_FAN && channel != GPU_FAN)
+				return -EINVAL;
+
+			/* 0 stops the fan where the EC supports it */
+			priv->stopped[channel] = val == 0 &&
+						 hp_wmi_zero_rpm_stops_fans();
+			if (priv->stopped[channel])
+				return hp_wmi_apply_fan_settings(priv);
 
 			/* ensure PWM input is within valid fan speeds */
 			rpm = pwm_to_rpm(val, priv);
@@ -3421,6 +3438,8 @@ static int hp_wmi_hwmon_write(struct device *dev, enum hwmon_sensor_types type,
 				priv->gpu_pwm = rpm_to_pwm(rpm, priv);
 			return hp_wmi_apply_fan_settings(priv);
 		}
+		priv->stopped[CPU_FAN] = false;
+		priv->stopped[GPU_FAN] = false;
 		switch (val) {
 		case PWM_MODE_MAX:
 			priv->mode = PWM_MODE_MAX;
@@ -3485,6 +3504,10 @@ static void hp_wmi_hwmon_keep_alive_handler(struct work_struct *work)
 	priv = container_of(dwork, struct hp_wmi_hwmon_priv, keep_alive_dwork);
 
 	guard(mutex)(&priv->lock);
+	/* Dead-man switch: only userspace may keep a stopped fan stopped. */
+	if (priv->mode == PWM_MODE_MANUAL &&
+	    (priv->stopped[CPU_FAN] || priv->stopped[GPU_FAN]))
+		return;
 	/*
 	 * Re-apply the current hwmon context settings.
 	 * NOTE: hp_wmi_apply_fan_settings will handle the re-scheduling.

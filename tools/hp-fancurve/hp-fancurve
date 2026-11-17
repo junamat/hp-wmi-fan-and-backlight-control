@@ -29,7 +29,15 @@ DEFAULTS = {
     "critical_hysteresis": 7,
     "down_delay": 8.0,        # seconds a lower target must persist
     "down_step": 4,           # max pwm % drop per interval
-    "min_change": 2,          # ignore changes smaller than this (pwm %)
+    "min_change": 2,          # ignore upward changes smaller than this (pwm %)
+    # Zero RPM: stop both fans when cool. Needs a driver that accepts pwmN = 0
+    # (zero_rpm_stops_fans boards). The driver lets the EC resume ~120 s after
+    # the last write, so the daemon re-sends 0 every zero_rpm_refresh seconds.
+    "zero_rpm": False,
+    "zero_rpm_below": 50,     # stop when below this for zero_rpm_hold seconds
+    "zero_rpm_hold": 30.0,
+    "zero_rpm_resume": 58,    # spin up at or above this
+    "zero_rpm_refresh": 30.0,
     "curves": {
         # [temperature C, pwm %] points, linear in between, per fan.
         "quiet": {
@@ -116,6 +124,10 @@ def load_config(path):
                     cfg["curves"].setdefault(prof, {}).update(fans)
             else:
                 cfg[k] = v
+    if cfg["zero_rpm"] and cfg["zero_rpm_resume"] <= cfg["zero_rpm_below"]:
+        raise ValueError("zero_rpm_resume must be above zero_rpm_below")
+    if cfg["zero_rpm_refresh"] >= 90:
+        raise ValueError("zero_rpm_refresh must be well under the EC's ~120 s timeout")
     for prof, fans in cfg["curves"].items():
         for fan, pts in fans.items():
             if len(pts) < 2 or any(not (0 <= p <= 100) for _, p in pts):
@@ -139,6 +151,9 @@ class Controller:
         self.lower_since = {1: None, 2: None}
         self.critical = False
         self.mode = None                   # last mode set (used in dry-run)
+        self.zero = False                  # fans stopped by zero_rpm
+        self.zero_written = 0.0
+        self.cool_since = None
 
     def p(self, name):
         return os.path.join(self.hp, name)
@@ -156,6 +171,7 @@ class Controller:
             self.mode = mode
             if mode != 1:
                 self.pwm = {1: None, 2: None}
+                self.zero = False
             return True
         return False
 
@@ -192,6 +208,8 @@ class Controller:
             log("manual fan mode")
         prof = self.profile()
         now = time.monotonic()
+        if cfg["zero_rpm"] and self.zero_rpm_step(t, cpu, gpu, now):
+            return
         for fan in (1, 2):
             want = round(interp(cfg["curves"][prof][f"fan{fan}"], t))
             cur = self.pwm[fan]
@@ -214,6 +232,36 @@ class Controller:
             self.pwm[fan] = new
             log(f"{prof} cpu={cpu:.0f}C gpu={'-' if gpu is None else f'{gpu:.0f}C'} "
                 f"fan{fan} -> {new}% (pwm {raw})")
+
+    def zero_rpm_step(self, t, cpu, gpu, now):
+        """Handle zero RPM. True when the fans are (kept) stopped."""
+        cfg = self.cfg
+        temps = f"cpu={cpu:.0f}C gpu={'-' if gpu is None else f'{gpu:.0f}C'}"
+        if self.zero:
+            if t >= cfg["zero_rpm_resume"]:
+                log(f"{temps} >= {cfg['zero_rpm_resume']}C, fans on")
+                self.zero = False
+                self.cool_since = None
+                self.pwm = {1: None, 2: None}    # curve takes over at once
+                return False
+            if now - self.zero_written >= cfg["zero_rpm_refresh"]:
+                self.write_zero()
+            return True
+        if t >= cfg["zero_rpm_below"]:
+            self.cool_since = None
+            return False
+        self.cool_since = self.cool_since or now
+        if now - self.cool_since < cfg["zero_rpm_hold"]:
+            return False
+        log(f"{temps} < {cfg['zero_rpm_below']}C for {cfg['zero_rpm_hold']:.0f}s, fans off")
+        self.write_zero()
+        self.zero = True
+        return True
+
+    def write_zero(self):
+        for fan in (1, 2):
+            write(self.p(f"pwm{fan}"), 0, self.dry)
+        self.zero_written = time.monotonic()
 
     def release(self):
         try:

@@ -10,6 +10,15 @@ down_delay = 8.0           # a lower target must hold this long before ramping d
 down_step = 4              # max pwm % drop per step
 min_change = 2             # ignore upward changes smaller than this (pwm %)
 
+# Zero RPM (opt-in): stop both fans while cool. Needs this repo's driver on a
+# zero_rpm_stops_fans board. If the daemon dies with the fans stopped, the EC
+# resumes its own curve within about 120 s (longer if the profile was changed meanwhile).
+zero_rpm = false
+zero_rpm_below = 50        # stop after zero_rpm_hold seconds below this
+zero_rpm_hold = 30.0
+zero_rpm_resume = 58       # spin up at or above this
+zero_rpm_refresh = 30.0    # re-send the stop this often (must stay well under 120 s)
+
 [curves.quiet]
 fan1 = [[55, 35], [70, 50], [80, 70], [88, 100]]
 fan2 = [[55, 35], [70, 50], [80, 70], [88, 100]]
