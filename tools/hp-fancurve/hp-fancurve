@@ -1,0 +1,257 @@
+#!/usr/bin/env python3
+"""hp-fancurve: temperature-driven fan curves for the hp-wmi hwmon interface.
+
+Some HP boards (e.g. Victus 16-e0xxx, board 8934) keep their fans near idle
+speed under sustained load in EC automatic mode. This daemon puts the hp-wmi
+fans in manual mode and sets pwm1/pwm2 from CPU and GPU temperatures, with one
+curve set per platform profile.
+
+Safety rules:
+  * CPU temperature unreadable          -> max fan mode (pwm1_enable=0)
+  * any temperature >= critical          -> max fan mode until it drops by
+                                            critical_hysteresis
+  * on exit (SIGTERM/SIGINT/error)       -> back to EC auto (pwm1_enable=2)
+"""
+
+import argparse
+import glob
+import os
+import signal
+import sys
+import time
+import tomllib
+
+DEFAULT_CONFIG = "/etc/hp-fancurve.toml"
+
+DEFAULTS = {
+    "interval": 2.0,
+    "critical": 92,
+    "critical_hysteresis": 7,
+    "down_delay": 8.0,        # seconds a lower target must persist
+    "down_step": 4,           # max pwm % drop per interval
+    "min_change": 2,          # ignore changes smaller than this (pwm %)
+    "curves": {
+        # [temperature C, pwm %] points, linear in between, per fan.
+        "quiet": {
+            "fan1": [[55, 35], [70, 50], [80, 70], [88, 100]],
+            "fan2": [[55, 35], [70, 50], [80, 70], [88, 100]],
+        },
+        "balanced": {
+            "fan1": [[50, 35], [65, 50], [75, 70], [85, 90], [90, 100]],
+            "fan2": [[50, 35], [65, 50], [75, 70], [85, 90], [90, 100]],
+        },
+        "performance": {
+            "fan1": [[45, 40], [60, 60], [70, 80], [80, 100]],
+            "fan2": [[45, 40], [60, 60], [70, 80], [80, 100]],
+        },
+    },
+}
+
+PROFILE_PATH = "/sys/firmware/acpi/platform_profile"
+
+
+def log(msg):
+    print(msg, flush=True)
+
+
+def read_int(path):
+    with open(path) as f:
+        return int(f.read().strip())
+
+
+def write(path, value, dry):
+    if dry:
+        return
+    with open(path, "w") as f:
+        f.write(f"{value}\n")
+
+
+def hwmon_by_name(name):
+    out = []
+    for d in sorted(glob.glob("/sys/class/hwmon/hwmon*")):
+        try:
+            with open(os.path.join(d, "name")) as f:
+                if f.read().strip() == name:
+                    out.append(d)
+        except OSError:
+            pass
+    return out
+
+
+def max_temp(dirs):
+    """Highest readable temp*_input across dirs, in C. None if none readable.
+
+    A runtime-suspended dGPU returns EBUSY/ENODATA; that counts as no reading.
+    """
+    best = None
+    for d in dirs:
+        for p in glob.glob(os.path.join(d, "temp*_input")):
+            try:
+                t = read_int(p) / 1000
+            except (OSError, ValueError):
+                continue
+            if best is None or t > best:
+                best = t
+    return best
+
+
+def interp(points, t):
+    pts = sorted(points)
+    if t <= pts[0][0]:
+        return pts[0][1]
+    for (t0, p0), (t1, p1) in zip(pts, pts[1:]):
+        if t <= t1:
+            return p0 + (p1 - p0) * (t - t0) / (t1 - t0)
+    return pts[-1][1]
+
+
+def load_config(path):
+    cfg = {**DEFAULTS, "curves": {k: dict(v) for k, v in DEFAULTS["curves"].items()}}
+    if path and os.path.exists(path):
+        with open(path, "rb") as f:
+            user = tomllib.load(f)
+        for k, v in user.items():
+            if k == "curves":
+                for prof, fans in v.items():
+                    cfg["curves"].setdefault(prof, {}).update(fans)
+            else:
+                cfg[k] = v
+    for prof, fans in cfg["curves"].items():
+        for fan, pts in fans.items():
+            if len(pts) < 2 or any(not (0 <= p <= 100) for _, p in pts):
+                raise ValueError(f"bad curve {prof}.{fan}: need >=2 points, pwm 0-100")
+    return cfg
+
+
+class Controller:
+    def __init__(self, cfg, dry):
+        self.cfg = cfg
+        self.dry = dry
+        hp = hwmon_by_name("hp")
+        if not hp:
+            raise RuntimeError("hp-wmi hwmon not found")
+        self.hp = hp[0]
+        self.cpu = hwmon_by_name("k10temp") + hwmon_by_name("coretemp")
+        self.gpu = hwmon_by_name("amdgpu")
+        if not self.cpu:
+            raise RuntimeError("no CPU temperature sensor (k10temp/coretemp)")
+        self.pwm = {1: None, 2: None}      # last written pwm %
+        self.lower_since = {1: None, 2: None}
+        self.critical = False
+        self.mode = None                   # last mode set (used in dry-run)
+
+    def p(self, name):
+        return os.path.join(self.hp, name)
+
+    def set_mode(self, mode):
+        if self.dry:
+            cur = self.mode
+        else:
+            try:
+                cur = read_int(self.p("pwm1_enable"))
+            except OSError:
+                cur = None
+        if cur != mode:
+            write(self.p("pwm1_enable"), mode, self.dry)
+            self.mode = mode
+            if mode != 1:
+                self.pwm = {1: None, 2: None}
+            return True
+        return False
+
+    def profile(self):
+        try:
+            with open(PROFILE_PATH) as f:
+                prof = f.read().strip()
+        except OSError:
+            prof = "balanced"
+        return prof if prof in self.cfg["curves"] else "balanced"
+
+    def step(self):
+        cfg = self.cfg
+        cpu = max_temp(self.cpu)
+        gpu = max_temp(self.gpu)
+        if cpu is None:
+            if self.set_mode(0):
+                log("CPU temperature unreadable -> max fans")
+            return
+        t = max(cpu, gpu or 0)
+
+        if t >= cfg["critical"]:
+            if not self.critical:
+                log(f"critical {t:.0f}C >= {cfg['critical']}C -> max fans")
+            self.critical = True
+        elif self.critical and t < cfg["critical"] - cfg["critical_hysteresis"]:
+            log(f"{t:.0f}C, leaving max fans")
+            self.critical = False
+        if self.critical:
+            self.set_mode(0)
+            return
+
+        if self.set_mode(1):
+            log("manual fan mode")
+        prof = self.profile()
+        now = time.monotonic()
+        for fan in (1, 2):
+            want = round(interp(cfg["curves"][prof][f"fan{fan}"], t))
+            cur = self.pwm[fan]
+            if cur is None or want >= cur + cfg["min_change"]:
+                new = want                       # ramp up at once
+                self.lower_since[fan] = None
+            elif want < cur:
+                # ramp down only after the lower target has held a while,
+                # and then in small steps
+                since = self.lower_since[fan] or now
+                self.lower_since[fan] = since
+                if now - since < cfg["down_delay"]:
+                    continue
+                new = max(want, cur - cfg["down_step"])
+            else:
+                self.lower_since[fan] = None
+                continue
+            raw = round(new * 255 / 100)
+            write(self.p(f"pwm{fan}"), raw, self.dry)
+            self.pwm[fan] = new
+            log(f"{prof} cpu={cpu:.0f}C gpu={'-' if gpu is None else f'{gpu:.0f}C'} "
+                f"fan{fan} -> {new}% (pwm {raw})")
+
+    def release(self):
+        try:
+            write(self.p("pwm1_enable"), 2, self.dry)
+            log("released fans to EC auto")
+        except OSError as e:
+            log(f"failed to release fans: {e}")
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("-c", "--config", default=DEFAULT_CONFIG)
+    ap.add_argument("-n", "--dry-run", action="store_true",
+                    help="read sensors and log decisions, write nothing")
+    ap.add_argument("--once", action="store_true", help="run one step and exit")
+    args = ap.parse_args()
+    if args.once and not args.dry_run:
+        ap.error("--once is only for --dry-run (it would leave fans in manual mode)")
+
+    cfg = load_config(args.config)
+    ctl = Controller(cfg, args.dry_run)
+    log(f"hp-fancurve: hwmon={ctl.hp} cpu={ctl.cpu} gpu={ctl.gpu} dry={args.dry_run}")
+
+    def stop(signum, _frame):
+        raise SystemExit(0)
+    signal.signal(signal.SIGTERM, stop)
+    signal.signal(signal.SIGINT, stop)
+
+    try:
+        while True:
+            ctl.step()
+            if args.once:
+                break
+            time.sleep(cfg["interval"])
+    finally:
+        if not args.once:
+            ctl.release()
+
+
+if __name__ == "__main__":
+    sys.exit(main())

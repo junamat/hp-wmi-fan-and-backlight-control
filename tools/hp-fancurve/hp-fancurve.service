@@ -1,0 +1,25 @@
+[Unit]
+Description=Temperature-driven fan curves for hp-wmi
+After=systemd-modules-load.service
+ConditionPathExists=/sys/devices/platform/hp-wmi
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/hp-fancurve
+Restart=on-failure
+RestartSec=5
+# On stop the daemon hands the fans back to EC auto (pwm1_enable=2).
+KillSignal=SIGTERM
+TimeoutStopSec=10
+
+NoNewPrivileges=yes
+PrivateNetwork=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ReadWritePaths=/sys/devices/platform/hp-wmi
+RestrictAddressFamilies=AF_UNIX
+LockPersonality=yes
+
+[Install]
+WantedBy=multi-user.target
