@@ -11,4 +11,4 @@ pkg/
 *.pkg.tar.zst
 akmod-build/
 .vscode
-src/
+src/__pycache__/
