@@ -114,6 +114,7 @@ sudo insmod hp-wmi.ko
 
 ### Tested on:
 - Victus 16‑s1 (9Z791EA) — tested by me.
+- Victus 16-e0xxx (board 8934, Ryzen 5 5600H) — manual fan control works; see [docs/boards/8934.md](docs/boards/8934.md). No RGB keyboard.
 - I need testers to report which models it works on or not. see https://github.com/TUXOV/hp-wmi-fan-and-backlight-control/issues/1
 
 ### Disclaimer
