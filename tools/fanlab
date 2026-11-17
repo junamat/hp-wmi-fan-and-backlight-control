@@ -1,0 +1,68 @@
+#!/bin/bash
+# fanlab - narrow root helper for hp-wmi fan driver testing.
+# Install root-owned at /usr/local/sbin/fanlab and allow it via a sudoers
+# NOPASSWD rule (see tools/README.md). It does not load arbitrary modules.
+# Only fixed actions; all arguments validated. No arbitrary paths or modules.
+set -euo pipefail
+export PATH=/usr/sbin:/usr/bin
+
+die() { echo "fanlab: $*" >&2; exit 1; }
+
+hwmon_dir() {
+	local d
+	for d in /sys/devices/platform/hp-wmi/hwmon/hwmon*; do
+		[[ -d $d && "$(cat "$d/name" 2>/dev/null)" == hp ]] && { echo "$d"; return; }
+	done
+	die "hp hwmon not found"
+}
+
+is_uint() { [[ $1 =~ ^[0-9]{1,5}$ ]]; }
+
+cmd=${1:-}
+case "$cmd" in
+reload)
+	# reload [force] -> reload the installed hp_wmi (force kept for older builds)
+	opt=""
+	[[ ${2:-} == force ]] && opt="force_fan_control_support=1"
+	[[ -n ${2:-} && ${2:-} != force ]] && die "usage: reload [force]"
+	modprobe -r hp_wmi
+	modprobe led_class_multicolor
+	modprobe hp_wmi $opt
+	echo "reloaded hp_wmi $opt"
+	;;
+mode)
+	# mode 0|1|2  -> pwm1_enable (0=max, 1=manual, 2=auto)
+	[[ ${2:-} =~ ^[012]$ ]] || die "usage: mode 0|1|2"
+	echo "$2" > "$(hwmon_dir)/pwm1_enable"
+	;;
+target)
+	# target 1|2 RPM -> fanN_target (older driver builds; RPM capped at 8000)
+	[[ ${2:-} =~ ^[12]$ ]] && is_uint "${3:-}" || die "usage: target 1|2 RPM"
+	(( $3 <= 8000 )) || die "rpm > 8000 refused"
+	echo "$3" > "$(hwmon_dir)/fan$2_target"
+	;;
+pwm)
+	# pwm 1|2 0-255 -> pwmN (current driver; only valid in manual mode)
+	[[ ${2:-} =~ ^[12]$ ]] && is_uint "${3:-}" || die "usage: pwm 1|2 0-255"
+	(( $3 <= 255 )) || die "pwm > 255 refused"
+	echo "$3" > "$(hwmon_dir)/pwm$2"
+	;;
+status)
+	d=$(hwmon_dir); echo "$d"
+	for f in "$d"/fan* "$d"/pwm*; do printf '%s=%s\n' "${f##*/}" "$(cat "$f" 2>&1)"; done
+	echo "platform_profile=$(cat /sys/firmware/acpi/platform_profile)"
+	;;
+dmesg)
+	dmesg | grep -iE 'hp.wmi|hp_wmi' | tail -n 50
+	;;
+acpi-dump)
+	# copy ACPI tables to a fresh world-readable temp dir, print its path
+	out=$(mktemp -d /tmp/acpi.XXXXXX); chmod 0755 "$out"
+	cp /sys/firmware/acpi/tables/DSDT /sys/firmware/acpi/tables/SSDT* "$out"/
+	chmod 0644 "$out"/*
+	echo "$out"; ls "$out"
+	;;
+*)
+	die "usage: fanlab reload [force] | mode 0|1|2 | target 1|2 RPM | pwm 1|2 0-255 | status | dmesg | acpi-dump"
+	;;
+esac
