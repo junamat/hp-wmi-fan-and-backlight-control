@@ -47,6 +47,13 @@ pwm)
 	(( $3 <= 255 )) || die "pwm > 255 refused"
 	echo "$3" > "$(hwmon_dir)/pwm$2"
 	;;
+profile)
+	# profile NAME -> /sys/firmware/acpi/platform_profile (must be a listed choice)
+	[[ ${2:-} =~ ^[a-z-]{1,20}$ ]] || die "usage: profile NAME"
+	grep -qw -- "$2" /sys/firmware/acpi/platform_profile_choices ||
+		die "not a choice: $(cat /sys/firmware/acpi/platform_profile_choices)"
+	echo "$2" > /sys/firmware/acpi/platform_profile
+	;;
 status)
 	d=$(hwmon_dir); echo "$d"
 	for f in "$d"/fan* "$d"/pwm*; do printf '%s=%s\n' "${f##*/}" "$(cat "$f" 2>&1)"; done
@@ -63,6 +70,6 @@ acpi-dump)
 	echo "$out"; ls "$out"
 	;;
 *)
-	die "usage: fanlab reload [force] | mode 0|1|2 | target 1|2 RPM | pwm 1|2 0-255 | status | dmesg | acpi-dump"
+	die "usage: fanlab reload [force] | mode 0|1|2 | target 1|2 RPM | pwm 1|2 0-255 | profile NAME | status | dmesg | acpi-dump"
 	;;
 esac

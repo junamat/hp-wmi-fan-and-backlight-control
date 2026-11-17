@@ -11,6 +11,7 @@ general sudo rule. It only runs fixed actions and checks every argument:
 | `mode 0\|1\|2` | `pwm1_enable`: max, manual, auto |
 | `pwm 1\|2 0-255` | `pwmN` (manual mode only) |
 | `target 1\|2 RPM` | `fanN_target` (older builds; capped at 8000) |
+| `profile NAME` | Set the platform profile (must be listed in `platform_profile_choices`) |
 | `status` | Print the hwmon fan and pwm values and the platform profile |
 | `dmesg` | Show the last `hp_wmi` kernel messages |
 | `acpi-dump` | Copy DSDT and SSDTs to a new readable directory under `/tmp` |
