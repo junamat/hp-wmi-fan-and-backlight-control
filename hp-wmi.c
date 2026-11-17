@@ -238,6 +238,14 @@ static const struct thermal_profile_params omen_v1_no_ec_thermal_params = {
 struct hp_wmi_fan_profile_params {
 	int (*get_fan_speed)(int fan);
 	bool fan_table;
+	/*
+	 * On these boards GM 0x2E takes a target of 0 literally: while GM 0x10
+	 * has the EC in user-defined mode, 0 stops the fan instead of meaning
+	 * "automatic". The EC leaves user-defined mode on its own about 120 s
+	 * after the last GM 0x10, so returning to auto must just stop the
+	 * keep-alive and clear max mode, never send 0.
+	 */
+	bool zero_rpm_stops_fans;
 };
 
 struct hp_wmi_board_params {
@@ -245,11 +253,29 @@ struct hp_wmi_board_params {
 	const struct hp_wmi_fan_profile_params *fan_profile;
 };
 
+static int hp_wmi_get_fan_speed(int fan);
 static int hp_wmi_get_fan_speed_victus_s(int fan);
 
 static const struct hp_wmi_fan_profile_params victus_s_fan_profile_params = {
 	.get_fan_speed	= hp_wmi_get_fan_speed_victus_s,
 	.fan_table	= true,
+};
+
+/*
+ * Victus 16-e0xxx (board 8934): BIOS reports no software fan support, but its
+ * ACPI GM2E writes the EC target registers SRP1/SRP2 (0x34/0x35) and GM10 sets
+ * OMCC (0x62 bit 0), which the EC requires before honouring them.
+ */
+static const struct hp_wmi_fan_profile_params victus_8934_fan_profile_params = {
+	.get_fan_speed		= hp_wmi_get_fan_speed,
+	.fan_table		= true,
+	.zero_rpm_stops_fans	= true,
+};
+
+static const struct hp_wmi_board_params victus_8934_board_params = {
+	/* Thermal profiles stay on the generic path for now. */
+	.thermal_profile	= NULL,
+	.fan_profile		= &victus_8934_fan_profile_params,
 };
 
 static const struct hp_wmi_board_params victus_s_board_params = {
@@ -335,6 +361,10 @@ static const struct dmi_system_id hp_wmi_feature_boards[] __initconst = {
 	{
 		.matches = { DMI_MATCH(DMI_BOARD_NAME, "8902") },
 		.driver_data = (void *)&omen_v1_legacy_board_params,
+	},
+	{
+		.matches = { DMI_MATCH(DMI_BOARD_NAME, "8934") },
+		.driver_data = (void *)&victus_8934_board_params,
 	},
 	{
 		.matches = { DMI_MATCH(DMI_BOARD_NAME, "8A3D") },
@@ -1052,20 +1082,26 @@ static int hp_wmi_fan_speed_max_set(int enabled)
 	return enabled;
 }
 
+static bool hp_wmi_zero_rpm_stops_fans(void);
+
+/* Target for one fan, in hundreds of RPM as GM 0x2E expects. */
+static u8 hp_wmi_fan_target(u8 pwm, struct hp_wmi_hwmon_priv *priv)
+{
+	if (pwm != HP_FAN_SPEED_AUTOMATIC)
+		return pwm_to_rpm(pwm, priv);
+	/* 0 would stop the fan here, not hand it back to the EC. */
+	if (hp_wmi_zero_rpm_stops_fans())
+		return priv->min_rpm;
+	return HP_FAN_SPEED_AUTOMATIC;
+}
+
 static int hp_wmi_fan_speed_set(struct hp_wmi_hwmon_priv *priv)
 {
 	u8 fan_speed[2];
 	int ret;
 
-	if (priv->cpu_pwm == HP_FAN_SPEED_AUTOMATIC)
-		fan_speed[CPU_FAN] = HP_FAN_SPEED_AUTOMATIC;
-	else
-		fan_speed[CPU_FAN] = pwm_to_rpm(priv->cpu_pwm, priv);
-
-	if (priv->gpu_pwm == HP_FAN_SPEED_AUTOMATIC)
-		fan_speed[GPU_FAN] = HP_FAN_SPEED_AUTOMATIC;
-	else
-		fan_speed[GPU_FAN] = pwm_to_rpm(priv->gpu_pwm, priv);
+	fan_speed[CPU_FAN] = hp_wmi_fan_target(priv->cpu_pwm, priv);
+	fan_speed[GPU_FAN] = hp_wmi_fan_target(priv->gpu_pwm, priv);
 
 	ret = hp_wmi_get_fan_count_userdefine_trigger();
 	if (ret < 0)
@@ -2521,6 +2557,13 @@ static bool hp_wmi_fan_control_supported(void)
 	return params && params->get_fan_speed;
 }
 
+static bool hp_wmi_zero_rpm_stops_fans(void)
+{
+	const struct hp_wmi_fan_profile_params *params = hp_wmi_fan_profile();
+
+	return params && params->zero_rpm_stops_fans;
+}
+
 static bool hp_wmi_fan_table_supported(void)
 {
 	const struct hp_wmi_fan_profile_params *params = hp_wmi_fan_profile();
@@ -3228,7 +3271,12 @@ static int hp_wmi_apply_fan_settings(struct hp_wmi_hwmon_priv *priv)
 
 	switch (priv->mode) {
 	case PWM_MODE_MAX:
-		if (hp_wmi_fan_control_supported()) {
+		/*
+		 * Arming user-defined mode here would leave a stale target live
+		 * once max mode is cleared; see zero_rpm_stops_fans.
+		 */
+		if (hp_wmi_fan_control_supported() &&
+		    !hp_wmi_zero_rpm_stops_fans()) {
 			ret = hp_wmi_get_fan_count_userdefine_trigger();
 			if (ret < 0)
 				return ret;
@@ -3249,7 +3297,8 @@ static int hp_wmi_apply_fan_settings(struct hp_wmi_hwmon_priv *priv)
 				 msecs_to_jiffies(KEEP_ALIVE_DELAY_SECS * 1000));
 		return 0;
 	case PWM_MODE_AUTO:
-		if (hp_wmi_fan_control_supported()) {
+		if (hp_wmi_fan_control_supported() &&
+		    !hp_wmi_zero_rpm_stops_fans()) {
 			ret = hp_wmi_get_fan_count_userdefine_trigger();
 			if (ret < 0)
 				return ret;
