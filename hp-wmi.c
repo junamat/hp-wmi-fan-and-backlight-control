@@ -353,6 +353,7 @@ static const char * const omen_timed_thermal_profile_boards[] = {
 /* DMI Board names of Victus 16-d laptops */
 static const char * const victus_thermal_profile_boards[] = {
 	"88F8",
+	"8934", /* GM1A writes HPCM at EC 0x95; generic 0x4C is a no-op */
 	"8A25",
 };
 
@@ -781,16 +782,22 @@ struct victus_s_fan_table {
  */
 #define KEEP_ALIVE_DELAY_SECS     90
 
+/*
+ * Round to nearest rather than truncate: pwm_to_rpm(rpm_to_pwm(x)) must give
+ * back x, or every write through pwmN loses up to 100 RPM per round trip.
+ */
 static inline u8 rpm_to_pwm(u8 rpm, struct hp_wmi_hwmon_priv *priv)
 {
-	return fixp_linear_interpolate(0, 0, priv->max_rpm, U8_MAX,
-				       clamp_val(rpm, 0, priv->max_rpm));
+	if (!priv->max_rpm)
+		return 0;
+	return DIV_ROUND_CLOSEST(clamp_val(rpm, 0, priv->max_rpm) * U8_MAX,
+				 priv->max_rpm);
 }
 
 static inline u8 pwm_to_rpm(u8 pwm, struct hp_wmi_hwmon_priv *priv)
 {
-	return fixp_linear_interpolate(0, 0, U8_MAX, priv->max_rpm,
-				       clamp_val(pwm, 0, U8_MAX));
+	return DIV_ROUND_CLOSEST(clamp_val(pwm, 0, U8_MAX) * priv->max_rpm,
+				 U8_MAX);
 }
 
 /* map output size to the corresponding WMI method id */
@@ -3431,8 +3438,8 @@ static int hp_wmi_hwmon_write(struct device *dev, enum hwmon_sensor_types type,
 			gpu_rpm = hp_wmi_get_active_fan_speed(GPU_FAN);
 			if (gpu_rpm < 0)
 				return gpu_rpm;
-			priv->cpu_pwm = rpm_to_pwm(cpu_rpm / 100, priv);
-			priv->gpu_pwm = rpm_to_pwm(gpu_rpm / 100, priv);
+			priv->cpu_pwm = rpm_to_pwm(DIV_ROUND_CLOSEST(cpu_rpm, 100), priv);
+			priv->gpu_pwm = rpm_to_pwm(DIV_ROUND_CLOSEST(gpu_rpm, 100), priv);
 			priv->mode = PWM_MODE_MANUAL;
 			return hp_wmi_apply_fan_settings(priv);
 		case PWM_MODE_AUTO:
