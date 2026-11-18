@@ -1,7 +1,8 @@
 # /etc/hp-fancurve.toml: every key is optional; missing keys use the built-in defaults.
 # Curves are [temperature C, pwm %] points per fan, interpolated linearly. The
 # temperature is the higher of the CPU (k10temp/coretemp) and amdgpu sensors.
-# The driver clamps low pwm values to the fan table minimum (2300 RPM on board 8934).
+# The driver clamps low pwm values to the board's floor (1000 RPM on board 8934,
+# otherwise the BIOS fan table minimum).
 
 interval = 2.0             # seconds between steps
 critical = 92              # at or above: max fan mode

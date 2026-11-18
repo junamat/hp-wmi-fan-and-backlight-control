@@ -10,7 +10,7 @@ Summary:        Kernel module for HP laptop fan and keyboard backlight control
 Version:        %{pkgver}
 Release:        1%{?dist}
 License:        GPL-2.0-or-later
-URL:            https://github.com/TUXOV/hp-wmi-fan-and-backlight-control
+URL:            https://github.com/junamat/hp-wmi-fan-and-backlight-control
 Source0:        hp-wmi.c
 Source1:        Makefile
 Source2:        LICENSE

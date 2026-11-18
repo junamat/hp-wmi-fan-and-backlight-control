@@ -22,6 +22,24 @@ Python 3.11 or newer, no other dependencies.
   the EC keeps the last targets for up to about 2 minutes before its own curve
   resumes.
 
+## Configuration
+
+`/etc/hp-fancurve.toml` is optional; every key falls back to a built-in default. See
+[`hp-fancurve.toml.example`](hp-fancurve.toml.example) for all keys. Curves are
+`[temperature °C, pwm %]` points per fan and profile, interpolated linearly.
+
+### Zero RPM (opt-in)
+
+On boards where the driver supports it (board 8934), `zero_rpm = true` stops both fans
+while the temperature stays below `zero_rpm_below` for `zero_rpm_hold` seconds, and spins
+them up again at `zero_rpm_resume`. The stop is re-sent every `zero_rpm_refresh` seconds.
+If the daemon dies with the fans stopped, the EC resumes its own curve within about 2
+minutes.
+
+Ready-made config for board 8934:
+[`examples/8934-zero-rpm.toml`](examples/8934-zero-rpm.toml) (fans off below 45–50 °C,
+then 1000 RPM rising to max at 80 °C).
+
 ## Install
 
 ```bash

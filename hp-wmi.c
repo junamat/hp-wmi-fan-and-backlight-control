@@ -280,7 +280,7 @@ static const struct hp_wmi_fan_profile_params victus_8934_fan_profile_params = {
 };
 
 static const struct hp_wmi_board_params victus_8934_board_params = {
-	/* Thermal profiles stay on the generic path for now. */
+	/* Thermal profiles: listed in victus_thermal_profile_boards (GM 0x1A). */
 	.thermal_profile	= NULL,
 	.fan_profile		= &victus_8934_fan_profile_params,
 };
