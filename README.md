@@ -51,6 +51,62 @@ Userspace (`tools/`):
 
 Packaging: DKMS version `0.0.4.2`.
 
+### How it fits together
+
+The driver only exposes controls: a fan mode and a fixed target per fan. It does not change
+fan speed with temperature. A fan curve comes from userspace, normally
+[`hp-fancurve`](tools/hp-fancurve/README.md). Without one, the embedded controller (EC)
+runs its own built-in curve.
+
+```mermaid
+flowchart TB
+    subgraph US["Userspace"]
+        CFG[/"/etc/hp-fancurve.toml"/]
+        FC["hp-fancurve daemon<br/>tools/hp-fancurve"]
+        YOU["You or scripts<br/>echo into sysfs, fanlab"]
+        GUI["victus-control GUI<br/>external, optional"]
+        PPD["power-profiles-daemon<br/>or Fn+P"]
+    end
+
+    subgraph K["Linux kernel"]
+        TEMP["k10temp, amdgpu<br/>temperature sensors"]
+        HW["hwmon<br/>pwm1_enable, pwm1, pwm2<br/>fan1_input, fan2_input"]
+        PP["platform_profile"]
+        LED["LED class<br/>hp::kbd_*"]
+        DRV["hp-wmi.c, this repo<br/>keep-alive every 90 s<br/>re-applies mode on resume<br/>back to auto on unload"]
+        WMI["WMI to ACPI \_SB.WMID<br/>GM commands, 0x20008"]
+    end
+
+    subgraph FW["Firmware and hardware"]
+        EC["Embedded controller<br/>own automatic curve<br/>drops manual mode after<br/>about 120 s without refresh"]
+        FANS(("Fan 1 CPU<br/>Fan 2 GPU"))
+        APU["AMD power limits<br/>DPTC"]
+        KBD["Keyboard backlight"]
+    end
+
+    CFG --> FC
+    FC -->|"reads temps"| TEMP
+    FC -->|"mode and pwm"| HW
+    FC -.->|"follows"| PP
+    YOU --> HW
+    GUI --> HW
+    PPD --> PP
+
+    HW --> DRV
+    PP --> DRV
+    LED --> DRV
+    DRV --> WMI
+
+    WMI -->|"0x10 arm manual<br/>0x2E targets, 0x27 max"| EC
+    EC -->|"0x2D fan speed"| WMI
+    WMI -->|"0x1A profile"| APU
+    WMI --> KBD
+    EC --> FANS
+```
+
+GM command numbers are the ones board 8934 and Victus S boards use. Other boards may use
+other WMI calls for the same controls; see [docs/boards/](docs/boards/).
+
 ### Installation
 
 DKMS:
