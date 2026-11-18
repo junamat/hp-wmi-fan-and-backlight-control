@@ -36,6 +36,10 @@ Driver (`hp-wmi.c`):
   their own floor through the `min_rpm` fan-profile field.
 - **Platform profiles on 8934.** Uses the Victus GM `0x1A` path, which applies the real AMD
   power limits. The generic WMI `0x4C` call does nothing on this board.
+- **Fans back to auto on unload (all boards).** Unloading the driver in manual or max mode
+  now hands the fans back to the EC. Before, max mode stayed on until reboot.
+- **Fan mode survives suspend (all boards).** The keep-alive stops before sleep, and manual
+  or max mode is re-applied on resume and after hibernation.
 - **pwm ↔ RPM rounding (all boards).** Conversions round to nearest instead of truncating,
   so a `pwmN` write no longer loses up to 100 RPM.
 

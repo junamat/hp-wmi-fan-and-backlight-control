@@ -3190,6 +3190,8 @@ static int __init hp_wmi_bios_setup(struct platform_device *device)
 	return 0;
 }
 
+static int hp_wmi_apply_fan_settings(struct hp_wmi_hwmon_priv *priv);
+
 #if LINUX_VERSION_CODE < KERNEL_VERSION(6, 11, 0)
 static int __exit hp_wmi_bios_remove(struct platform_device *device)
 #else
@@ -3218,8 +3220,21 @@ static void __exit hp_wmi_bios_remove(struct platform_device *device)
 	}
 
 	priv = platform_get_drvdata(device);
-	if (priv)
+	if (priv) {
 		cancel_delayed_work_sync(&priv->keep_alive_dwork);
+		/*
+		 * Hand the fans back to the EC. Max mode (FFFS) never lapses on
+		 * its own, so leaving it set would pin the fans at full speed
+		 * until the next driver load or reboot.
+		 */
+		scoped_guard(mutex, &priv->lock) {
+			if (priv->mode != PWM_MODE_AUTO) {
+				priv->mode = PWM_MODE_AUTO;
+				if (hp_wmi_apply_fan_settings(priv))
+					pr_warn("failed to restore automatic fan control on unload\n");
+			}
+		}
+	}
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(6, 14, 0)
 	if (platform_profile_support)
@@ -3231,8 +3246,44 @@ static void __exit hp_wmi_bios_remove(struct platform_device *device)
 #endif
 }
 
+static int hp_wmi_suspend_handler(struct device *device)
+{
+	struct hp_wmi_hwmon_priv *priv = dev_get_drvdata(device);
+
+	/* No WMI fan calls while the system goes down; resume re-arms. */
+	if (priv)
+		cancel_delayed_work_sync(&priv->keep_alive_dwork);
+
+	return 0;
+}
+
+/*
+ * The EC may drop user-defined fan mode (OMCC) and max mode across sleep.
+ * Re-apply manual or max mode at once instead of waiting for the next
+ * keep-alive, which suspend cancelled. A fan stopped through pwmN = 0 gets
+ * its 0 resent, so the dead-man window restarts from resume.
+ */
+static void hp_wmi_resume_fan_settings(struct device *device)
+{
+	struct hp_wmi_hwmon_priv *priv = dev_get_drvdata(device);
+	int ret;
+
+	if (!priv)
+		return;
+
+	guard(mutex)(&priv->lock);
+	if (priv->mode == PWM_MODE_AUTO)
+		return;
+	ret = hp_wmi_apply_fan_settings(priv);
+	if (ret)
+		dev_warn(device, "failed to restore fan settings on resume: %d\n",
+			 ret);
+}
+
 static int hp_wmi_resume_handler(struct device *device)
 {
+	hp_wmi_resume_fan_settings(device);
+
 	/*
 	 * Hardware state may have changed while suspended, so trigger
 	 * input events for the current state. As this is a switch,
@@ -3269,7 +3320,11 @@ static int hp_wmi_resume_handler(struct device *device)
 }
 
 static const struct dev_pm_ops hp_wmi_pm_ops = {
+	.suspend  = hp_wmi_suspend_handler,
 	.resume  = hp_wmi_resume_handler,
+	.freeze  = hp_wmi_suspend_handler,
+	.thaw  = hp_wmi_resume_handler,
+	.poweroff  = hp_wmi_suspend_handler,
 	.restore  = hp_wmi_resume_handler,
 };
 
