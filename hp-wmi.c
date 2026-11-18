@@ -246,6 +246,11 @@ struct hp_wmi_fan_profile_params {
 	 * keep-alive and clear max mode, never send 0.
 	 */
 	bool zero_rpm_stops_fans;
+	/*
+	 * Lowest manual target in hundreds of RPM, when the hardware holds
+	 * speeds below the BIOS fan table minimum. 0 = use the table minimum.
+	 */
+	u8 min_rpm;
 };
 
 struct hp_wmi_board_params {
@@ -270,6 +275,8 @@ static const struct hp_wmi_fan_profile_params victus_8934_fan_profile_params = {
 	.get_fan_speed		= hp_wmi_get_fan_speed,
 	.fan_table		= true,
 	.zero_rpm_stops_fans	= true,
+	/* Both fans held 900-1900 RPM steadily; 700 RPM was unsteady. */
+	.min_rpm		= 10,
 };
 
 static const struct hp_wmi_board_params victus_8934_board_params = {
@@ -1097,16 +1104,6 @@ static int hp_wmi_fan_speed_max_set(int enabled)
 }
 
 static bool hp_wmi_zero_rpm_stops_fans(void);
-
-/*
- * Testing aid: let manual targets go below the BIOS fan table minimum (the
- * table is HP's own curve, not a hardware limit). Fans may hold, be floored
- * by the EC, or stall at low targets, so this stays off by default.
- */
-static bool allow_below_fan_table;
-module_param(allow_below_fan_table, bool, 0444);
-MODULE_PARM_DESC(allow_below_fan_table,
-		 "Allow manual fan targets below the BIOS fan table minimum (testing)");
 
 /* Target for one fan, in hundreds of RPM as GM 0x2E expects. */
 static u8 hp_wmi_fan_target(u8 pwm, struct hp_wmi_hwmon_priv *priv)
@@ -3441,9 +3438,7 @@ static int hp_wmi_hwmon_write(struct device *dev, enum hwmon_sensor_types type,
 
 			/* ensure PWM input is within valid fan speeds */
 			rpm = pwm_to_rpm(val, priv);
-			rpm = clamp_val(rpm,
-					allow_below_fan_table ? 1 : priv->min_rpm,
-					priv->max_rpm);
+			rpm = clamp_val(rpm, priv->min_rpm, priv->max_rpm);
 			if (channel == CPU_FAN)
 				priv->cpu_pwm = rpm_to_pwm(rpm, priv);
 			else if (channel == GPU_FAN)
@@ -3583,6 +3578,9 @@ static int hp_wmi_setup_fan_settings(struct hp_wmi_hwmon_priv *priv)
 		return -EINVAL;
 
 	priv->min_rpm = min_rpm;
+	if (hp_wmi_fan_profile()->min_rpm &&
+	    hp_wmi_fan_profile()->min_rpm < min_rpm)
+		priv->min_rpm = hp_wmi_fan_profile()->min_rpm;
 	priv->max_rpm = max_rpm;
 
 	return 0;

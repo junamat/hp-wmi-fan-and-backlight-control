@@ -1,0 +1,20 @@
+# Board 8934 (Victus 16-e0xxx): fans off when cool, then 1000 RPM rising to max at 80 C.
+# pwm % is of the 5500 RPM table maximum: 18 % ~ 1000 RPM (the driver floor on 8934).
+
+zero_rpm = true
+zero_rpm_resume = 50       # fans on at 50 C
+zero_rpm_below = 45        # off again after zero_rpm_hold seconds below 45 C
+zero_rpm_hold = 30.0
+zero_rpm_refresh = 30.0
+
+[curves.quiet]
+fan1 = [[50, 18], [80, 100]]
+fan2 = [[50, 18], [80, 100]]
+
+[curves.balanced]
+fan1 = [[50, 18], [80, 100]]
+fan2 = [[50, 18], [80, 100]]
+
+[curves.performance]
+fan1 = [[50, 18], [80, 100]]
+fan2 = [[50, 18], [80, 100]]
