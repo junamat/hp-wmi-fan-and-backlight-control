@@ -49,7 +49,7 @@ Userspace (`tools/`):
 - [`fanlab`](tools/README.md): small root helper for testing fan control without a general
   sudo rule.
 
-Packaging: DKMS version `0.0.4.1`.
+Packaging: DKMS version `0.0.4.2`.
 
 ### Installation
 
